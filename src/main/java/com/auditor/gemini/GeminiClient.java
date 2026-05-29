@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 
+import com.auditor.config.AppConfig;
 import com.auditor.model.Tweet;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,7 +29,7 @@ public class GeminiClient {
 
   //variables
   private final String apiKey;
-  private List<String> criteria;
+  private final List<String> criteria;
   private final HttpClient httpClient;
   private final ObjectMapper mapper;
   private final ExecutorService threadPool;
@@ -44,6 +45,14 @@ public class GeminiClient {
     this.threadPool = Executors.newFixedThreadPool(5);
   }
 
+  //constructor for mock
+  public GeminiClient(AppConfig config, HttpClient httpClient) {
+      this.apiKey = config.getApiKey();
+      this.criteria = config.getCriteria();
+      this.httpClient = httpClient; // uses the one you pass in
+      this.mapper = new ObjectMapper();
+      this.threadPool = Executors.newFixedThreadPool(5);
+  }
 
   //take all batches and calls evaluateBatch, passing one batch after another
   public List<EvaluationResult> evaluateAll(List<List<Tweet>> batches) throws InterruptedException {
@@ -96,6 +105,8 @@ public class GeminiClient {
     return promptStringBuilder.toString();
   }
 
+
+  //set rate limit for how calling gemini
   private String callGeminiWithRetry(String prompt) throws Exception {
     int attempts = 0;
 
@@ -114,13 +125,13 @@ public class GeminiClient {
 
       } catch (RateLimitException e) {
         attempts++;
-        System.err.printf("Rate limited, retrying in " + RETRY_DELAY_MS + "ms (attempt %d)" + attempts);
+        System.err.printf("Rate limited, retrying in " + RETRY_DELAY_MS + "ms (attempt %d)", attempts);
 
         Thread.sleep(RETRY_DELAY_MS * attempts); // to keep off longer with each retry
 
       } catch (Exception e) {
         attempts++;
-        System.err.printf("Request failed: " + e.getMessage() + " (attempt %d", attempts);
+        System.err.printf("Request failed: " + e.getMessage() + " (attempt %d)", attempts);
 
         if (attempts >= MAX_RETRIES) throw e;
         Thread.sleep(RETRY_DELAY_MS);
@@ -130,7 +141,7 @@ public class GeminiClient {
     throw new RuntimeException("Max retries exceeded");
   }
 
-  //request build that gemini would expect
+  //Http request to gemini with request build that gemini would expect
   private String callGemini(String prompt) throws IOException, InterruptedException {
     
     String requestBody = """
@@ -141,9 +152,7 @@ public class GeminiClient {
         }
         """.formatted(prompt.replace("\"", "\\\"").replace("\n", "\\n"));
 
-        HttpRequest request = HttpRequest.newBuilder()
-        .uri(URI.create(GEMINI_URL + apiKey))
-        .header("Content-Type", "application/json")
+        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(GEMINI_URL + apiKey)).header("Content-Type", "application/json")
         .POST(HttpRequest.BodyPublishers.ofString(requestBody)).build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -163,7 +172,7 @@ public class GeminiClient {
             .asText();
   }
 
-  //adding gemini json response into EvaluatioResult object
+  //adding gemini json response into EvaluationResult object
   private List<EvaluationResult> parseResponse(String responseText, List<Tweet> batch) {
         List<EvaluationResult> results = new ArrayList<>();
         Map<String, String> urlById = new HashMap<>();
@@ -172,13 +181,13 @@ public class GeminiClient {
         }
         
         try {
-            // Strip markdown code fences if Gemini ignored our instructions
-            String clean = responseText
+            // Strip all mark down code fences if Gemini ignored our instructions
+            String cleanText = responseText
                 .replace("```json", "")
                 .replace("```", "")
                 .trim();
  
-            JsonNode array = mapper.readTree(clean);
+            JsonNode array = mapper.readTree(cleanText);
             for (JsonNode node : array) {
                 String id = node.get("id").asText();
                 boolean flagged = node.get("flagged").asBoolean();

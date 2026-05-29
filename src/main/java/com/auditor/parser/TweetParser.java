@@ -12,24 +12,27 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class TweetParser {
 
-    private ObjectMapper mapper = new ObjectMapper();
-    private String username;
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final String username;
 
     //constructor
     public TweetParser(String username) {
         this.username = username;
     }
 
+    //parsing tweets and retaining only id, text, date created and url
     public List<Tweet> parse(Path tweetsJsPath) throws IOException {
+        //reads the entire file as one string
         String raw = Files.readString(tweetsJsPath);
 
-        int jsonstart = raw.indexOf('[');
+        int jsonStart = raw.indexOf('[');
 
-        if (jsonstart == -1) {
-            throw new IllegalArgumentException("No JSON array found in twwets.js - unexpected file format");
+        if (jsonStart == -1) {
+            throw new IllegalArgumentException("No JSON array found in tweets.js - unexpected file format");
         }
 
-        String json = raw.substring(jsonstart);
+        //cut off everything before index"[", not inclusive, pass whatever is let to json
+        String json = raw.substring(jsonStart);
 
         JsonNode root = mapper.readTree(json);
         if (!root.isArray()) {
@@ -38,6 +41,7 @@ public class TweetParser {
 
         List<Tweet> tweets = new ArrayList<>();
 
+        //iterate through every node element on the tree made from 'json'
         for (JsonNode element : root) {
             JsonNode tweetNode = element.get("tweet");
 
@@ -49,6 +53,7 @@ public class TweetParser {
             String fullText = tweetNode.get("full_text").asText();
             String createdAt = tweetNode.get("created_at").asText();
 
+            //check if it's a retweet and drop it if yes
             if (fullText.startsWith("RT @")) {
                 continue;
             }
