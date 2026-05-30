@@ -1,6 +1,5 @@
 package com.auditor.auditor;
 
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.List;
 
