@@ -3,7 +3,7 @@
 A Java-powered application that analyzes your X (Twitter) archive using Google Gemini AI to identify and flag tweets for deletion based on a set criteria.
 
 ### High level flow of application
-![alt text](image.png)
+![alt text](src\main\resources\static\image.png)
 ---
 
 ## Features
