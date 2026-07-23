@@ -1,4 +1,4 @@
-package com.auditor.gemini;
+package com.auditor.errors;
 
 public class RateLimitException extends RuntimeException {
     public RateLimitException(String message) { super(message); } 

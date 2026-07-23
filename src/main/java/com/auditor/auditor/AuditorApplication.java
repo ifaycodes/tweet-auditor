@@ -29,34 +29,35 @@ public class AuditorApplication {
 
 		//parse tweets from archive
 		TweetParser parser = new TweetParser(config.getUsername());
-		List<Tweet> tweets = parser.parse(Path.of("tweets.js")).subList(0, 100);
+		List<Tweet> tweets = parser.parse(Path.of("tweets.js")).subList(0, 1000);
 
-		System.out.println("Created " + tweets.size() + " tweets.");
+		System.out.println("Created " + tweets.size() + " tweet objects.");
 
 
 		//filter out already processed tweets by id
 		Path checkpointPath = Path.of("checkpoint.txt");
 		CheckPointStore checkpoint = new CheckPointStore(checkpointPath);
 
-		tweets.stream().filter(t -> !checkpoint.isProcessed(t.getId())).toList();
+		tweets = tweets.stream().filter(t -> !checkpoint.isProcessed(t.getId())).toList();
+
+		System.out.println(tweets.size() + " tweets remaining after checkpoint filter.");
 
 
-		//batch tweets into chunks of 50
+		//batch tweets into chunks of 25
 		List<List<Tweet>> batches = BatchBuilder.partition(tweets, 25);
 
 		System.out.println("Created " + batches.size() + " batches.");
 
 
+		//write flagged tweets to csv, and mark tweets processed, as each batch comes back
+		CsvWriter csvWriter = new CsvWriter(Path.of("flaggedtweets.csv"), checkpointPath);
+
 		//send batches to gemini for evaluation
 		GeminiClient geminiClient = new GeminiClient(config);
-		List<EvaluationResult> results = geminiClient.evaluateAll(batches);
+		List<EvaluationResult> results = geminiClient.evaluateAll(batches, csvWriter::writeToCsv);
 
 		System.out.println("Evaluation complete. " + results.size() + " results returned.");
 
-
-		//write flagged tweets to csv
-		CsvWriter csvWriter = new CsvWriter(Path.of("flaggedtweets.csv"), checkpointPath);
-		csvWriter.writeToCsv(results);
 		long flaggedCount = results.stream().filter(EvaluationResult::isFlagged).count();
 
 		System.out.println("Done. " + flaggedCount + " tweets flagged and written to flaggedtweets.csv.");

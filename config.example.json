@@ -1,0 +1,9 @@
+{
+  "apiKey": "Gemini API-Key",
+  "username": "Your X_username",
+  "criteria": [
+    "List of criteria you want it to evaluate against",
+    "Could be tone or certain words",
+    "Define them all here"
+  ]
+}

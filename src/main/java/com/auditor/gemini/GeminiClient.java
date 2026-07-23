@@ -9,12 +9,17 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 import com.auditor.config.AppConfig;
+import com.auditor.errors.DailyQuotaExceededException;
+import com.auditor.errors.RateLimitException;
 import com.auditor.model.Tweet;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,6 +29,7 @@ public class GeminiClient {
 
   //using semaphore to rate limit across threads
   private static final Semaphore RATE_LIMITER = new Semaphore(1);
+  private static final ScheduledExecutorService RATE_LIMITER_SCHEDULER = Executors.newSingleThreadScheduledExecutor();
 
   private static final String GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=";
 
@@ -40,7 +46,7 @@ public class GeminiClient {
   public GeminiClient(AppConfig config) {
     this.apiKey = config.getApiKey();
     this.criteria = config.getCriteria();
-    this.httpClient = HttpClient.newHttpClient();
+    this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build();
     this.mapper = new ObjectMapper();
     this.threadPool = Executors.newFixedThreadPool(5);
   }
@@ -54,25 +60,43 @@ public class GeminiClient {
       this.threadPool = Executors.newFixedThreadPool(5);
   }
 
-  //take all batches and calls evaluateBatch, passing one batch after another
-  public List<EvaluationResult> evaluateAll(List<List<Tweet>> batches) throws InterruptedException {
+  //functional interface so callers can persist each batch's results as soon as it completes
+  @FunctionalInterface
+  public interface BatchResultHandler {
+    void onBatchComplete(List<EvaluationResult> batchResults) throws Exception;
+  }
+
+  //take all batches and calls evaluateBatch, passing one batch after another.
+  //invokes onBatchComplete as soon as each batch's results are ready, so progress isn't lost if a later batch fails or the run is interrupted
+  public List<EvaluationResult> evaluateAll(List<List<Tweet>> batches, BatchResultHandler onBatchComplete) {
         List<Future<List<EvaluationResult>>> futures = new ArrayList<>();
- 
+
         for (List<Tweet> batch : batches) {
             Future<List<EvaluationResult>> future = threadPool.submit(() -> evaluateBatch(batch));
             futures.add(future);
         }
- 
+
         List<EvaluationResult> allResults = new ArrayList<>();
-        for (Future<List<EvaluationResult>> future : futures) {
+        for (int i = 0; i < futures.size(); i++) {
             try {
-                allResults.addAll(future.get()); // blocks until that batch is done
+                List<EvaluationResult> batchResults = futures.get(i).get(); // blocks until that batch is done
+                allResults.addAll(batchResults);
+                onBatchComplete.onBatchComplete(batchResults);
             } catch (Exception e) {
                 System.err.println("Batch failed: " + e.getMessage());
+
+                if (e.getCause() instanceof DailyQuotaExceededException) {
+                    int remaining = futures.size() - i - 1;
+                    System.err.println("Daily quota exceeded — stopping run, skipping " + remaining + " remaining batch(es).");
+                    for (int j = i + 1; j < futures.size(); j++) {
+                        futures.get(j).cancel(false);
+                    }
+                    break;
+                }
             }
         }
- 
-        threadPool.shutdown();
+
+        threadPool.shutdownNow();
         return allResults;
     }
 
@@ -83,11 +107,11 @@ public class GeminiClient {
     return parseResponse(responseText, batch);
   }
 
-  //build prompt with criteria and batch of twet list and ask for json response back
+  //build prompt with criteria and batch of tweet list and ask for json response back
   private String buildPrompt(List<Tweet> batch) {
     StringBuilder promptStringBuilder = new StringBuilder();
 
-    promptStringBuilder.append("You are reviewing tweets to flag ones that violate the following critera:\n");
+    promptStringBuilder.append("You are reviewing tweets to flag ones that violate the following criteria:\n");
     for (int i=0; i < criteria.size(); i++) {
       promptStringBuilder.append((i+1)).append(". ").append(criteria.get(i)).append("\n");
     }
@@ -111,17 +135,14 @@ public class GeminiClient {
     int attempts = 0;
 
     while (attempts < MAX_RETRIES) {
+      //block until there is a slot
+      RATE_LIMITER.acquire();
       try {
-        //block until there is a slot
-        RATE_LIMITER.acquire();
-        String result = callGemini(prompt);
+          return callGemini(prompt);
 
-        // release after 1 second to maintain gemini 60 requests/min rate limit
-        new Thread(() -> {
-          try { Thread.sleep(1100); } catch (InterruptedException ignored) {}
-          RATE_LIMITER.release();
-        }).start();
-        return result;
+      } catch (DailyQuotaExceededException e) {
+        //retrying within seconds can't help a daily cap, so give up on this batch right away
+        throw e;
 
       } catch (RateLimitException e) {
         attempts++;
@@ -135,6 +156,10 @@ public class GeminiClient {
 
         if (attempts >= MAX_RETRIES) throw e;
         Thread.sleep(RETRY_DELAY_MS);
+      } finally {
+        // release after 1 second to maintain Gemini 60 requests/min intended rate limit,
+        // regardless of whether the call succeeded or failed
+        RATE_LIMITER_SCHEDULER.schedule(() -> RATE_LIMITER.release(), 1100, TimeUnit.MILLISECONDS);
       }
     }
     
@@ -152,11 +177,20 @@ public class GeminiClient {
         }
         """.formatted(prompt.replace("\"", "\\\"").replace("\n", "\\n"));
 
-        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(GEMINI_URL + apiKey)).header("Content-Type", "application/json")
-        .POST(HttpRequest.BodyPublishers.ofString(requestBody)).build();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(GEMINI_URL + apiKey))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody)).build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() == 429) {
+          String body = response.body();
+          //Gemini's daily-quota exceptions include a quotaId like "...PerDayPerProjectPerModel..."
+          //a per-minute throttle does not, so this substring is how we tell the two apart
+          if (body != null && body.toLowerCase().contains("perday")) {
+            throw new DailyQuotaExceededException("Gemini daily quota exceeded: " + extractErrorSummary(body));
+          }
           throw new RateLimitException("Gemini rate limit hit");
         }
         if (response.statusCode() != 200) {
@@ -170,6 +204,16 @@ public class GeminiClient {
             .path("parts").get(0)
             .path("text")
             .asText();
+  }
+
+  //pulls just status + message out of a Gemini error body instead of dumping the whole JSON
+  private String extractErrorSummary(String body) {
+    try {
+      JsonNode error = mapper.readTree(body).path("error");
+      return "[" + error.path("status").asText() + "] " + error.path("message").asText();
+    } catch (Exception e) {
+      return body;
+    }
   }
 
   //adding gemini json response into EvaluationResult object

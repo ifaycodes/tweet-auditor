@@ -48,8 +48,8 @@ class GeminiClientTest {
 
 
         assertEquals(1, results.size());
-        assertTrue(results.get(0).isFlagged());
-        assertEquals("contains profanity", results.get(0).getReason());
+        assertTrue(results.getFirst().isFlagged());
+        assertEquals("contains profanity", results.getFirst().getReason());
         assertTrue(prompt.contains("contains profanity"));
         assertTrue(prompt.contains("this is a bad tweet"));
     }
@@ -93,9 +93,9 @@ class GeminiClientTest {
         tweet.setCreatedAt("2024-01-01");
         tweet.setUrl("https://x.com/testuser/status/123");
 
-        List<EvaluationResult> results = client.evaluateAll(List.of(List.of(tweet)));
+        List<EvaluationResult> results = client.evaluateAll(List.of(List.of(tweet)), batchResults -> {});
 
         assertEquals(1, results.size());
-        assertTrue(results.get(0).isFlagged());
+        assertTrue(results.getFirst().isFlagged());
     }
 }
